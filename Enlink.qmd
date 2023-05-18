@@ -1,0 +1,423 @@
+---
+title: "Enlnk Probabilistic B31G"
+subtitle: "Anomalies Filtered for Greater Than 20% Depth"
+author: "Audubon"
+date: today
+date-format: long
+execute:
+  echo: false
+  warning: false
+  message: false
+  dpi: 300
+format:
+  html:
+    theme: default
+    toc: true
+    self-contained: true
+    number-sections: false
+editor_options: 
+  
+  chunk_output_type: console
+---
+
+```{r}
+#| label: load-Libraries
+#| echo: false
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(extRemes)
+library(rriskDistributions)
+library(here)
+
+theme_set(theme_minimal(14))
+
+```
+  
+# Uncertainty in a Measurement
+
+In a pipeline assessment there are multiple layers of uncertainty. The concern is not what I have remediated but the "next" defect. The most severe defect that you decided not to remediate. There is no such thing as a perfect measurement no matter how precise it is. Even if it was known with very high precision, the probable error of the ILI tool and accounted for it in the decision this still leaves the uncertainty in SMYS, wall thickness, length, etc. Even if someone has records to prove what the specified wall thickness is. That only tells the person what the nominal wall thickness was from the pipe mill and doesn't account for corrosion or tolerances in manufacturing. So the question is; what can be done. The easiest, though not necessarily conservative, answer would be take an average of the values. This may not reflect reality and may not be conservative. You could assume they are all at the minimum values. This is certainty conservative but inadvertently raises risk elsewhere by triggering unnecessary digs.
+
+# Monte Carlo Background
+
+Monte Carlo simulations work on the principal of the Law of Large Numbers. This theorem states that the average of a large number of trials will converge on the true expected value as the number of trials increases. So this works by assuming that each uncertain variable follows a probability distribution. Then the software randomly samples from that distribution thousands of times over and develops a profile of the empirical distribution for the metric of interest, in the case failure stress of a metal loss anomaly. This are the ideal tool when there are too many degrees of freedom to compute directly in a closed form solution.
+
+For each anomaly, 20,000 simulations are completed, each time randomly drawing from the distributions for tool tolerance, yield strength, wall thickness. In addition, the B31G equation has uncertainty relative to the true failure stress. Though B31G has been shown to be conservative most of the time, in some cases it can be unconservative. Therefore an additional distribution for the accuracy of the B31G model is included as well. Then after the iterations for each anomaly are completed, the number of simulations where the failure stress was less than the operating stress divided by the total number of simulations to calculate a probability of exceedance (POE).  
+
+```{r}
+#| label: data
+#| echo: false
+
+
+pofseg <- readxl::read_xlsx(here("line_16in.xlsx"), skip = 5) %>%
+  janitor::clean_names() %>%
+  filter(event== "metal loss corrosion" |
+           event == "cluster", depth_percent>20)
+  # mutate(dc = peak_pdepth*wall/100)
+
+n_anom <- nrow(pofseg)
+
+D <- 16 #Actual Diameter not nominal
+
+RAI <- 10 #Reassessment Interval in years
+# set RAI = 0 to take out future corrosion
+
+n <- 2e4 #NUmber of sims
+
+pctsmys <- 788 / (2 * 6e4 * 0.188 / 16) # pct of SMYS operating at
+
+# wall thickness ----------------------------------------------------------
+
+shapes <-
+  map(pofseg$wall_thickness_in,
+      ~ get.beta.par(
+        q = c(0.965 * .x, .x, 1.1 * .x),
+        p = c(0.05, 0.5, 0.99),
+        show.output = FALSE,
+        plot = FALSE
+      ))
+
+tv <- unlist(map(shapes,~rbeta(n, .x[[1]], .x[[2]])))
+
+# Length ------------------------------------------------------------------
+
+L_par <- get.gamma.par(
+      q = c(0.9 , 1, 1.1),
+      p = c(0.01, 0.5, 0.99),
+      show.output = FALSE,
+      plot = FALSE
+    )
+
+Lv <- unlist(map(pofseg$length_in,~rgamma(n,  L_par[[1]], L_par[[2]])*.x))
+
+
+# depth -------------------------------------------------------------------
+
+# This assumes the defect is under/over-called by a percentage of called depth.
+# Though the tool tolerances are a percentage of wall thickness. Percentage of
+# wall tolerances can create negative vales for the depth.
+
+d_par <- map(pofseg$depth_percent/100,
+             ~ rriskDistributions::get.beta.par(
+               q = c(0.83 * .x, .x, 1.17 * .x),
+               p = c(0.10, 0.5, 0.95),
+               show.output = FALSE,
+               plot = FALSE
+             ))
+
+ # dv <- unlist(map(d_par,  ~ rbeta(n, .x[[1]], .x[[2]]))) # percentage
+
+dv <-
+  tibble(d = unlist(map(
+    pofseg$depth_percent / 100,  ~ rnorm(n, 0, 0.08) + .x
+  ))) %>%
+  mutate(
+    d = ifelse(d < 0.15, d + rgamma(1, 40, 224), d),
+    d = ifelse(d < 0.15, d + rgamma(1, 26, 224), d),
+    d = ifelse(d > 0.90, d - rgamma(1, shape = 50, rate = 750), d)
+  )
+
+# hist(dv$d, breaks = 60)
+
+# CGR ---------------------------------------------------------------------
+
+bias = 0 # (% bias)
+
+dc_M = 0.003  # mean corrosion rate for depth, in./yr. - NOT MPY
+
+# std. deviation for depth corrosion rate, in./yr. - NOT MPY
+# variable depth based on uncertainty of corrosion rate and tool call
+
+shape_cgr <- get.beta.par(
+  q = c(0.25 * dc_M, dc_M, 1.25 * dc_M),
+  p = c(0.001, 0.5, 0.99),
+  show.output = FALSE,
+  plot = FALSE
+)
+
+dcg <- rbeta(n * n_anom, shape_cgr[[1]],shape_cgr[[2]]) * RAI +(dv$d*tv)
+# hist(dcg, breaks = 100)
+
+
+# Diameter ----------------------------------------------------------------
+
+D_S <- ifelse(6.625 < D & D <= 24, #currently only set up for > 6 inch
+              min(0.0075 * D, 0.125) / 2,
+              min(D * 0.005, 0.16) / 2)  # This assumes that 5L max tolerances =2 Sigma
+
+Dv = rnorm(n*n_anom, D, D_S)
+
+# SMYS --------------------------------------------------------------------
+
+SMYSv <- unlist(map(pofseg$smys_psi,  ~ revd(
+  n = n,
+  loc = 1.06,
+  scale = 0.0562,
+  shape = -0.1891
+) * .x))
+
+# based on data provided by Benjamin
+
+
+# hist(SMYSv, breaks=60)
+
+####Uncertainty in Modified B31G Formula####
+
+# Formula is conservative most of the time, the mean and SD were taken as an
+# average of two studies The Advantica Report 3781 and PDAM
+# Advantica: 1.06/0.118
+# PDAM: 1.01/0.13 for 3 factor folias and SMYS + 10ksi
+# One study indicated that Pa/Pf followed a generalized extreme value distribution
+# but not much difference between that and a normal for the parameters given.
+# Changed distribution to gamma due to extreme values either side of mean for
+# normal and lognormal.  These parameters agree with min/max stated by kiefner
+# in studies of MB31G.  Set location to 0.94 to agree with Kiefner study.
+
+# BF_M = 1.05
+# BF_S = 0.05
+
+ratios <- read_csv("C:\\Users\\Joel\\OneDrive - RSI Pipeline Solutions\\Alyeska\\B31Gstudy\\PR3_805_data.csv") %>%
+  rename(ratio = pp_pa_ratio)
+
+
+rat_par <- fevd(1/ratios$ratio)
+
+
+BF_L <- rat_par$results$par[[1]]
+BF_sc <- rat_par$results$par[[2]]
+BF_sh <- rat_par$results$par[[3]]
+
+# Accuracy of B31G Equation ----------------------------------------------
+
+BF <- tibble(f = revd(n * 4, 0.95 * BF_L, BF_sc, BF_sh)) %>%
+  filter(f < 1.25, f > 0.75) %>% #truncated dist. at 1.5 and 0.75
+  sample_n(size = n) %>% 
+  pull(f)
+  
+  # hist(BF, breaks = 60)
+
+
+# Folias Factor -----------------------------------------------------------
+
+M <- ifelse(Lv ^ 2 / (Dv * tv) <= 50,
+            sqrt(1 + 0.6275 * (Lv / sqrt(Dv *tv)) ^ 2 - 0.003375 * (Lv / sqrt(Dv * tv)) ^ 4),
+            0.032 * (Lv / sqrt(Dv * tv)) ^ 2 + 3.3)  # Folias Factor
+
+
+# B31G --------------------------------------------------------------------
+
+
+bsf <- 1.0 # B31G shape factor
+
+SB31G = (SMYSv+1e4) * ((1 - bsf * dcg / tv) / (1 - bsf * dcg / tv * 1 /
+                                                    M)) * BF
+# hist(SB31G, breaks = 60,xlim = c(3e4,1.25e5))
+# P31 = 2 * SB31G * tv / Dv
+
+FPR = SB31G/(rep(pofseg$smys_psi, each = n)*pctsmys) #Failure Pressure Ratio
+
+# combine tibble ----------------------------------------------------------
+
+dt <- tibble(dv =dv$d, tv, Lv, SMYSv, M,  Dv, dcg, SB31G, FPR) %>%
+  mutate(idx = rep(pofseg$feature_id, each = n)) %>%
+  group_by(idx) %>%
+  nest() %>%
+  bind_cols(
+    t = pofseg$wall_thickness_in,
+    L = pofseg$length_in,
+    d = pofseg$depth_percent,
+    SMYS = pofseg$smys_psi
+  ) %>%
+  relocate(data, .after = SMYS) #don't view this DF it will bomb system - too large
+
+dt2 <- dt %>%
+  mutate(POE = unlist(map(data,  ~ length(which(
+    .x$FPR <= 1.0 # <=== changed to 1.25 from 1
+  )) / n)),) %>%
+  relocate(POE, .after = SMYS)
+
+POE_all <- 1 - prod(1-dt2$POE)
+
+```
+
+# Accuracy of B31G Model  
+The distribution of the actual burst pressure to predicted B31G burst pressure is shown in @fig-B31accurate. The distribution is based on a 1989 burst tests study done by Battelle on pipe with known actual yield stress - rather than assumed SMYS. This study showed that using the Modified B31G criterion, the mean ratio of actual to predicted failure pressure was about 1.5 with a large right skew and about 4% of the time it was non-conservative.
+
+```{r}
+#| label: fig-B31accurate
+#| fig-cap: "B31G Model Uncertainty"
+#| echo: false
+#| message: false
+#| warning: false
+
+
+df <- tibble(x = seq(0.75,3, length.out = 300))
+
+df %>%
+  ggplot(aes(x)) +
+  stat_function(
+    fun = devd,
+    args = list(
+      rat_par$results$par[[1]],
+      rat_par$results$par[[2]],
+      rat_par$results$par[[3]]
+    ),
+  #   fun = dgamma,
+  #   args=list(rat_par2[[1]],rat_par2[[2]]),
+    col = 'royalblue',
+    lwd=1.1,
+    n=301
+  ) +
+  labs(x = "Ratio of Actual Failure Pressure to Predicted",
+       y = NULL,
+       caption = "Based on PRC AGA Project PR-3-805") +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    plot.margin = margin(0.6, 0.6, 0.6, 0.6, "cm")
+  ) 
+
+```
+
+
+# Distribution of YS/SMYS  
+This distribution is based on industry data of actual yield strength values. The actual yield strength (YS) typically exceeds the specified minimum yield strength (SMYS) by about 10% on average across all grades. However, since API 5L manufacturing quality control is based on random sampling and even double sampling, there is exists a small probability that a given joint of pipe can have a YS that is below slightly below SMYS. The distribution of YS to SMYS accounts for this and is shown in @fig-smys.
+
+```{r}
+#| label: fig-smys
+#| fig-cap: "Distribution of YS/SMYS"
+#| echo: false
+#| warning: false
+#| message: false
+
+smysdf <- tibble(x = seq(0.9,1.3, length.out=400))
+
+smysdf %>%
+  ggplot(aes(x)) +
+  stat_function(
+    fun = devd,
+    args = list(loc = 1.075, scale = 0.0562, shape = -0.1891),
+    col = 'firebrick2',
+    lwd = 1.1
+  ) +
+labs(x = "Ratio of YS/SMYS",
+     y = NULL) +
+  theme(
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank(),
+    plot.margin = margin(0.6, 0.6, 0.6, 0.6, "cm")
+  )
+# this is based on actual YS data from Alyeska
+
+```
+
+# Depth Tolerances
+MFL ILI tools typically have a tolerance of $\pm$ 10%, 80% of the time this translates into $\pm$ 15%, 95% of the time. When the anomaly is near the long seam then the tolerance increases to $\pm$ 17%, 80% of the time. The following distribution shown in @fig-depth is the percent of wall thickness tolerance considered for each anomaly.  
+
+```{r}
+#| label: fig-depth
+#| fig-cap: "Depth Tolerances"
+#| echo: false
+#| warning: false
+#| message: false
+
+dpdf <- tibble(x = seq(-0.35,0.35, length.out = 300))
+
+dpdf %>%
+  ggplot(aes(x)) +
+  stat_function(
+    fun = dnorm,
+    args = list(0,0.132),
+    col = 'royalblue2',
+    lwd = 1.1
+  )+
+  scale_x_continuous(label=scales::label_percent())+
+  labs(x = "Percent of Wall Thickness Tolerance", 
+        y = NULL)
+
+
+```
+
+# Anomaly Table
+
+This table is interactive, all columns can be filtered and sorted. Use the slider at bottom of table to move the view of the table to the right when accessing the filter setting for POE. The PoE is calculated based on then number of simulations for each anomaly that indicate that the calculated failure pressure was less than MAOP. For example if the 100 of the 20,000 simulations indicated a failure pressure less than MAOP then the PoE would be $\frac{100}{20000} = 0.005$. It's possible for different anomalies of the same dimensions to have slightly different PoE since the Monte Carlo analysis is based on random sampling from a distribution for each of the varaibles.
+
+The probability of the operating pressure exceeding the burst pressure of any anomaly is $POE$. Therefore the probability that the operating pressure doesn't exceed its burst pressure of an anomaly is $1- POE$ and the probability that *none* of them exceed is the product of all those quantities $\prod{\left(1-POE\right)} = (1-POE_1)(1-POE_2)(1-POE_3)\dots$ and consequently the probability that *any* of them fail is $1-\prod{\left(1-POE\right)}$
+
+```{r}
+#| label: anom-table
+#| echo: false
+#| warning: false
+#| message: false
+
+#for large multiplications use exp(sum(log(x))) to avoid floating point overflow
+
+dt2 %>%
+  select(-data) %>%
+  mutate(d = round(d, 1),
+         L = round(L, 1),
+         SMYS = as.integer(SMYS)) %>%
+  rename(Length = L,
+         '% Depth' = d,
+         'Feature ID' = idx) %>%
+  DT::datatable(filter = "top",
+                caption = "Anomaly POE Table",
+                options = list(width = 9))
+
+```
+
+# Cumulative POE  
+
+The cumulative POE shown in @fig-cumpct is the cumulative percentage of the population at or below a given POE threshold.  
+
+```{r}
+#| label: fig-cumpct
+#| fig-cap: "Cumulative Percentage of POE"
+
+dt2 %>%
+  ggplot(aes(POE)) +
+  stat_ecdf(col = 'red',
+            lwd = 1.1) +
+  scale_x_log10(
+    # breaks = seq(0, 0.14, by = 0.01),
+    expand = c(0, 0)
+    # limits = c(0, 0.01)
+  ) +
+  labs(title = "Emperical Cumulative Probabiity vs. POE",
+       # caption = "Truncated at 0.05 for purposes of scale",
+       y = "Cumulative Percentage of Anomalies") +
+  theme(plot.margin = margin(0.6, 0.7, 0.6, 0.6, "cm"))
+
+```
+
+# Number of Digs  
+This plot shows the impact on the number of digs required at a given POE threshold. Specifically how many digs would it require to remediate all the anomalies above a given threshold. There was a total of `r nrow(pofseg)` that exceeded the filtering threshold of 20% of which 49 had a Probability of Exceedance (PoE) that was $10^{-5}$ or greater.
+
+```{r}
+#| label: fig-POEdigs
+#| fig-cap: "Number of digs vs. POE"
+
+POEi <- seq(1e-5,0.01, by = 0.00001)
+
+digs <- nrow(pofseg)- map_int(POEi,~length(dt2$POE[dt2$POE<.]))
+
+POE_elim <- (POE_all - (map_dbl(POEi, ~ prod(1-dt2$POE[dt2$POE>.]))))/POE_all
+
+poe_tbl <- tibble(POEi, digs, POE_elim) %>% 
+  mutate(delta = (lag(POE_elim)-POE_elim)/(lag(digs)-digs)) %>% 
+  filter(digs>0, !is.nan(delta))
+
+
+poe_tbl %>%
+  ggplot(aes(POEi, digs)) +
+  geom_line(lwd = 1,
+            col = 'royalblue') +
+  scale_y_continuous(breaks = scales::pretty_breaks()) +
+  labs(y = "Number of Digs",
+       x = "POE Threshold (log scale)",
+       title = "Number of Digs vs. Minimum POE Threshold") +
+  scale_x_log10()
+
+```
+
