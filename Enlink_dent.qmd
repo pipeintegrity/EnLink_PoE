@@ -1,0 +1,128 @@
+---
+title: "Dent Strain Analysis for EnLink"
+author: "Audubon"
+format: docx
+editor: visual
+execute:
+  echo: false
+  warning: false
+  message: false
+  dpi: 300
+---
+
+```{r}
+library(tidyverse)
+library(here)
+```
+
+## Introduction  
+
+This follows a modified B31.8 Dent Strain calculation that corrects for plastic strain. The equation for effective strain in B31.8 can be off by a factor of two in some cases. This calculation assumes a constant arc through the bottom of the dent but a consideration should be made to use less than the total length and width to account for the change in curvature between the shoulders of the dent and deepest part if the point-to-point deformation readings are not available. In this case 80% of the width and length are used to account for the change in curvature.
+
+Dent strain is composed of three components:
+
+The circumferential strain.
+
+$$
+\varepsilon_1=\frac{t}{2}\left(\frac{1}{R_0}-\frac{1}{R_1}\right)
+$$ {#eq-circStrain}
+
+The bending strain in the longitudinal direction.
+
+$$
+\varepsilon_2=\frac{-t}{2R_2}
+$$ {#eq-bendStrain}
+
+The third component is the membrane strain.
+
+$$
+\varepsilon_3=\frac{1}{2}\left(\frac{d}{L}\right)^{2}
+$$ {#eq-memStrain}
+
+These three components are used in the calculation of the overall strain on the inside and outside surface of the pipe. The strain on the inside surface is @eq-eps_i and the outside surface by @eq-eps_o.
+
+$$
+\begin{equation}
+\varepsilon_i=\frac{2}{\sqrt{3}}\sqrt{\varepsilon_1^{2}+\varepsilon_1\left(\varepsilon_2+\varepsilon_3\right)+\left(\varepsilon_2+\varepsilon_3\right)^{2}}\end{equation}
+$$ {#eq-eps_i}
+
+$$
+\begin{equation}
+\varepsilon_o=\frac{2}{\sqrt{3}}\sqrt{\varepsilon_1^{2}-\varepsilon_1\left(-\varepsilon_2+\varepsilon_3\right)+\left(-\varepsilon_2+\varepsilon_3\right)^{2}}
+\end{equation}
+$$ {#eq-eps_o}
+
+Where:
+
+D = Pipe diameter (in.)
+
+t = wall thickness (in.)
+
+$C_1 =$ Width of dent (in.)
+
+$C_2 =$ Length of dent (in.)
+
+$R_0 =$ Pipe Radius = $\frac{D}{2}$
+
+$R_1 =$ Dent Radius in the transverse direction. Negative if dent is re-entrant, positive if only flattened.
+
+$R_2 =$ Dent Radius in the longitudinal direction
+
+p = Percent of Diameter depth of dent
+
+b = Dent depth: $p\times D$
+
+## Radius Calculations
+
+$R_1$ and $R_2$ are calculated using @eq-radius and the corresponding length in the transverse or longitudinal direction. This radius assumes a constant circular arc given the length and depth of the dent. This is sometimes not the case, therefore consideration should be made of using a shorter distance to account for non-uniform dent when necessary. When available, the actual point to point deformation data is preferable to calculate the radius but using 80% of the length and width should be conservative.
+
+$$
+\begin{equation}
+R=\frac{4b^{2}+c^{2}}{8b}
+\end{equation}\
+$$ {#eq-radius}
+
+## Dent Analysis
+
+According to the file *16in Line 303227 C Loop_Draft Client List.xlsx* there were 25 dents identified by the ILI tool. The modified B31.8 dent analysis was performed for those dents and the results shown here. The highest strain identified was 4.4% for feature id 681.
+
+```{r}
+#| label: dents
+#| tbl-cap: "Dent Analysis"
+
+readxl::read_xlsx(here("line_16in.xlsx"), skip = 5) %>%
+  janitor::clean_names() %>%
+  filter(str_detect(event, "dent")) %>%
+  mutate(
+    R0 = od_in / 2,
+    R1 = -(4 * (od_reduction_percent / 100 * od_in) ^ 2 + (width_in *
+                                                             0.80) ^ 2) / (8 * od_reduction_percent / 100 * od_in),
+    R2 = (4 * (od_reduction_percent / 100 * od_in) ^ 2 + (length_in *
+                                                            0.80) ^ 2) / (8 * od_reduction_percent / 100 * od_in),
+    eps1 = wall_thickness_in / 2 * (1 / R0 - 1 / R1),
+    eps2 = -wall_thickness_in / (2 * R2),
+    eps3 = 1 / 2 * (od_reduction_percent / 100 * od_in / (length_in *
+                                                            0.80)) ^ 2,
+    eps_i = 2 / sqrt(3) * sqrt(eps1 ^ 2 + eps1 * (eps2 + eps3) + (eps2 + eps3) ^ 2),
+    eps_o = 2 / sqrt(3) * sqrt(eps1 ^ 2 - eps1 * (-eps2 + eps3) + (-eps2 + eps3) ^ 2)
+  ) %>%
+  select(feature_id,
+         od_reduction_percent,
+         wall_thickness_in,
+         length_in,
+         width_in,
+         eps_i,
+         eps_o) %>%
+  rename(
+    dent_depth_pct = od_reduction_percent,
+    wall = wall_thickness_in,
+    inside_strain = eps_i,
+    outside_strain = eps_o
+  ) %>%
+  flextable::flextable() %>%
+  flextable::colformat_double(j = 6:7, digits = 3) %>% 
+  flextable::set_caption("Dent Strain Analysis")
+
+
+
+```

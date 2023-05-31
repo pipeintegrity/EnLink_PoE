@@ -1,0 +1,19 @@
+---
+title: "Dent Strain"
+author: "Audubon"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction  
+This follows a modified B31.8 Dent Strain calculation that corrects for plastic strain. The equation for effective strain in B31.8 can be off by a factor of two in some cases. This calculation assumes a constant arc through the bottom of the dent but a consideration should be made to use less than the total length and width to account for the change in curvature between the shoulders of the dent and deepest part if the point-to-point deformation readings are not available.
+
+Dent strain is composed of three components:
+
+$$
+\epsilon_1 = \frac{t}{2}\left(\frac{1}{R_0}-\frac{1}{R_1}\right)
+$$

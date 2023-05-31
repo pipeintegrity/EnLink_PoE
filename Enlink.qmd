@@ -50,10 +50,10 @@ For each anomaly, 20,000 simulations are completed, each time randomly drawing f
 #| echo: false
 
 
-pofseg <- readxl::read_xlsx(here("line_16in.xlsx"), skip = 5) %>%
+pofseg <- readxl::read_xlsx(here("line_16in.xlsx")) %>%
   janitor::clean_names() %>%
   filter(event== "metal loss corrosion" |
-           event == "cluster", depth_percent>20)
+           event == "cluster", depth_percent>=20)
   # mutate(dc = peak_pdepth*wall/100)
 
 n_anom <- nrow(pofseg)
@@ -65,7 +65,7 @@ RAI <- 10 #Reassessment Interval in years
 
 n <- 2e4 #NUmber of sims
 
-pctsmys <- 788 / (2 * 6e4 * 0.188 / 16) # pct of SMYS operating at
+pctsmys <- 946 / (2 * 6e4 * 0.188 / 16) # pct of SMYS operating at
 
 # wall thickness ----------------------------------------------------------
 
@@ -341,7 +341,7 @@ dpdf %>%
 
 # Anomaly Table
 
-This table is interactive, all columns can be filtered and sorted. Use the slider at bottom of table to move the view of the table to the right when accessing the filter setting for POE. The PoE is calculated based on then number of simulations for each anomaly that indicate that the calculated failure pressure was less than MAOP. For example if the 100 of the 20,000 simulations indicated a failure pressure less than MAOP then the PoE would be $\frac{100}{20000} = 0.005$. It's possible for different anomalies of the same dimensions to have slightly different PoE since the Monte Carlo analysis is based on random sampling from a distribution for each of the varaibles.
+This table is interactive, all columns can be filtered and sorted. Use the slider at bottom of table to move the view of the table to the right when accessing the filter setting for POE. The PoE is calculated based on then number of simulations for each anomaly that indicate that the calculated failure pressure was less than MAOP. For example if the 100 of the 20,000 simulations indicated a failure pressure less than MAOP then the PoE would be $\frac{100}{20000} = 0.005$. It's possible for different anomalies of the same dimensions to have slightly different PoE since the Monte Carlo analysis is based on random sampling from a distribution for each of the variables.
 
 The probability of the operating pressure exceeding the burst pressure of any anomaly is $POE$. Therefore the probability that the operating pressure doesn't exceed its burst pressure of an anomaly is $1- POE$ and the probability that *none* of them exceed is the product of all those quantities $\prod{\left(1-POE\right)} = (1-POE_1)(1-POE_2)(1-POE_3)\dots$ and consequently the probability that *any* of them fail is $1-\prod{\left(1-POE\right)}$
 
