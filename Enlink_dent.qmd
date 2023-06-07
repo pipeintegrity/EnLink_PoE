@@ -1,8 +1,9 @@
 ---
-title: "Dent Strain Analysis for EnLink"
-author: "Audubon"
-format: docx
+title: "Dent Strain Analysis for EnLink Midstream"
+author: "Audubon Field Solutions"
+format: html
 editor: visual
+self-contained: true
 execute:
   echo: false
   warning: false
@@ -13,9 +14,10 @@ execute:
 ```{r}
 library(tidyverse)
 library(here)
+library(DT)
 ```
 
-## Introduction  
+## Introduction
 
 This follows a modified B31.8 Dent Strain calculation that corrects for plastic strain. The equation for effective strain in B31.8 can be off by a factor of two in some cases. This calculation assumes a constant arc through the bottom of the dent but a consideration should be made to use less than the total length and width to account for the change in curvature between the shoulders of the dent and deepest part if the point-to-point deformation readings are not available. In this case 80% of the width and length are used to account for the change in curvature.
 
@@ -39,7 +41,7 @@ $$
 \varepsilon_3=\frac{1}{2}\left(\frac{d}{L}\right)^{2}
 $$ {#eq-memStrain}
 
-These three components are used in the calculation of the overall strain on the inside and outside surface of the pipe. The strain on the inside surface is @eq-eps_i and the outside surface by @eq-eps_o.
+These three components are used in the calculation of the overall strain on the inside and outside surface of the pipe. The strain on the inside surface is @eq-eps_i and the outside surface by @eq-eps_o. The curvature strain is the maximum of @eq-eps_i and @eq-eps_o.
 
 $$
 \begin{equation}
@@ -58,9 +60,9 @@ D = Pipe diameter (in.)
 
 t = wall thickness (in.)
 
-$C_1 =$ Width of dent (in.)
+$c_1 =$ Width of dent (in.); used for radius calculation
 
-$C_2 =$ Length of dent (in.)
+$c_2 =$ Length of dent (in.); used for radius calculation
 
 $R_0 =$ Pipe Radius = $\frac{D}{2}$
 
@@ -84,16 +86,25 @@ $$ {#eq-radius}
 
 ## Dent Analysis
 
-According to the file *16in Line 303227 C Loop_Draft Client List.xlsx* there were 25 dents identified by the ILI tool. The modified B31.8 dent analysis was performed for those dents and the results shown here. The highest strain identified was 4.4% for feature id 681.
-
 ```{r}
 #| label: dents
-#| tbl-cap: "Dent Analysis"
 
-readxl::read_xlsx(here("line_16in.xlsx"), skip = 5) %>%
+
+sixt <- readxl::read_xlsx(here("line_16in.xlsx")) %>%
+  janitor::clean_names() 
+
+ili_dents <-
+  readxl::read_xlsx(
+    here(
+      "20in Line 303227 C Loop - Kaker Junction to Bridgeport_MFL-A-XT Draft Client List.xlsx"
+    ),
+    skip = 5
+  ) %>%
   janitor::clean_names() %>%
+  bind_rows(sixt) %>%
   filter(str_detect(event, "dent")) %>%
   mutate(
+    oclock_seam_pos = format(oclock_seam_pos, format = "%H:%M"),
     R0 = od_in / 2,
     R1 = -(4 * (od_reduction_percent / 100 * od_in) ^ 2 + (width_in *
                                                              0.80) ^ 2) / (8 * od_reduction_percent / 100 * od_in),
@@ -104,25 +115,109 @@ readxl::read_xlsx(here("line_16in.xlsx"), skip = 5) %>%
     eps3 = 1 / 2 * (od_reduction_percent / 100 * od_in / (length_in *
                                                             0.80)) ^ 2,
     eps_i = 2 / sqrt(3) * sqrt(eps1 ^ 2 + eps1 * (eps2 + eps3) + (eps2 + eps3) ^ 2),
-    eps_o = 2 / sqrt(3) * sqrt(eps1 ^ 2 - eps1 * (-eps2 + eps3) + (-eps2 + eps3) ^ 2)
+    eps_o = 2 / sqrt(3) * sqrt(eps1 ^ 2 - eps1 * (-eps2 + eps3) + (-eps2 + eps3) ^ 2),
+    curve_strain = if_else(eps_i > eps_o, eps_i, eps_o),
+    L_d = length_in / (od_reduction_percent / 100 * od_in),
+    critical = case_when(
+      curve_strain > 0.06 ~ 1,
+      od_reduction_percent > 6 ~ 1,
+      L_d <= 20 ~ 1,
+      event == "dent detected w/ metal loss" ~ 1,
+      TRUE ~ 0
+    ),
+    criterion = case_when(
+      curve_strain > 0.06 ~ "> 6% Strain",
+      od_reduction_percent > 6 ~ ">6 % depth",
+      L_d <= 20 ~ "L/d < 20",
+      event == "dent detected w/ metal loss" ~ "dent w/ ML",
+      TRUE ~ "Not Critical"
+    ),
+    latitude2 = longitude,
+    # actually long coord.
+    long2 = latitude,
+    # actually lat coord.
+    latitude = latitude2,
+    longitude = long2
   ) %>%
+  select(-c(latitude2, long2)) %>%
+  select(
+    feature_id,
+    event,
+    od_in,
+    od_reduction_percent,
+    oclock_seam_pos,
+    length_in,
+    width_in,
+    curve_strain,
+    od_reduction_percent,
+    L_d,
+    critical,
+    criterion,
+    longitude,
+    latitude
+  ) 
+
+maxdent <- ili_dents %>% filter(curve_strain==max(ili_dents$curve_strain))
+
+crit_dent <- ili_dents %>% 
+  filter(critical==1) %>% 
+  mutate(curve_strain =round(curve_strain,3))
+ 
+```
+
+The files *16in Line 303227 C Loop_Draft Client List.xlsx* and *20in Line 303227 C Loop - Kaker Junction to Bridgeport_MFL-A-XT Draft Client List.xlsx* are used in this analysis. There are a total of `r nrow(crit_dent)` dents identified by the ILI tool that meet EnLink's criteria for a critical dent out of a total of `r nrow(ili_dents)` identified. The modified B31.8 dent analysis completed for those dents and the results shown here. The highest strain identified was `r paste0(round(max(crit_dent$curve_strain)*100,1),"%")` for feature id `r maxdent$feature_id`.
+
+```{r}
+#| label: tbl-strain
+#| tbl-cap: "Dent Strain Analysis"
+
+
+ili_dents %>%
   select(feature_id,
+         criterion,
+         od_in,
          od_reduction_percent,
-         wall_thickness_in,
+         oclock_seam_pos,
          length_in,
          width_in,
-         eps_i,
-         eps_o) %>%
-  rename(
-    dent_depth_pct = od_reduction_percent,
-    wall = wall_thickness_in,
-    inside_strain = eps_i,
-    outside_strain = eps_o
-  ) %>%
-  flextable::flextable() %>%
-  flextable::colformat_double(j = 6:7, digits = 3) %>% 
-  flextable::set_caption("Dent Strain Analysis")
+         curve_strain,
+         od_reduction_percent,
+         L_d,
+         criterion
+         ) %>%
+rename(
+  depth = od_reduction_percent,
+  Strain = curve_strain,
+  OD = od_in,
+  `L/d` = L_d,
+  Length =  length_in,
+  Width = width_in,
+  Position = oclock_seam_pos
+    ) %>%
+mutate(Strain = round(Strain,3),
+       `L/d` = round(`L/d`,1)
+       ) %>%
+DT::datatable()
+  # flextable::flextable() %>%
+  # flextable::colformat_double(j = 7, digits = 3) %>% 
+  # flextable::colformat_double(j = 8, digits = 1) %>% 
+  # flextable::set_caption("Dent Strain Analysis")
+
+```
+
+## Map of Critical Dents
+
+```{r}
+#| label: mapdents
+
+library(leaflet)
 
 
+leaflet(crit_dent) %>%
+  addTiles() %>%
+   addMarkers(lng = ~crit_dent$longitude,lat = ~crit_dent$latitude,
+             popup = ~glue::glue('ID = {feature_id}, Depth = {od_reduction_percent}, strain = {curve_strain}, reason = {criterion}'),
+             label = ~crit_dent$feature_id
+             )
 
 ```
